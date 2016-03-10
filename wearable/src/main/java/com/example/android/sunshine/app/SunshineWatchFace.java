@@ -21,21 +21,43 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.res.Resources;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.Typeface;
+import android.os.AsyncTask;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
 import android.support.wearable.watchface.CanvasWatchFaceService;
 import android.support.wearable.watchface.WatchFaceStyle;
 import android.text.format.DateFormat;
+import android.util.Log;
 import android.view.SurfaceHolder;
 import android.view.WindowInsets;
 
+import com.google.android.gms.common.ConnectionResult;
+import com.google.android.gms.common.api.GoogleApiClient;
+import com.google.android.gms.common.api.ResolvingResultCallbacks;
+import com.google.android.gms.common.api.ResultCallback;
+import com.google.android.gms.common.api.Status;
+import com.google.android.gms.wearable.Asset;
+import com.google.android.gms.wearable.DataApi;
+import com.google.android.gms.wearable.DataEvent;
+import com.google.android.gms.wearable.DataEventBuffer;
+import com.google.android.gms.wearable.DataItemBuffer;
+import com.google.android.gms.wearable.DataMap;
+import com.google.android.gms.wearable.DataMapItem;
+import com.google.android.gms.wearable.PutDataMapRequest;
+import com.google.android.gms.wearable.PutDataRequest;
+import com.google.android.gms.wearable.Wearable;
+
+import java.io.InputStream;
 import java.lang.ref.WeakReference;
+import java.lang.reflect.Type;
 import java.text.SimpleDateFormat;
 import java.util.Calendar;
 import java.util.Date;
@@ -86,21 +108,35 @@ public class SunshineWatchFace extends CanvasWatchFaceService {
         }
     }
 
-    private class Engine extends CanvasWatchFaceService.Engine {
-        static final String COLON_STRING = ":";
+    private class Engine extends CanvasWatchFaceService.Engine implements DataApi.DataListener,
+            GoogleApiClient.ConnectionCallbacks,
+            GoogleApiClient.OnConnectionFailedListener {
+        private static final String WEATHER_PATH = "/weather";
 
-        final Handler mUpdateTimeHandler = new EngineHandler(this);
-        boolean mRegisteredTimeZoneReceiver = false;
-        Paint mBackgroundPaint;
-        Paint mHourPaint;
-        Paint mMinuteSecondPaint;
-        Paint mSecondaryTextPaint;
-        boolean mAmbient;
-        Date mDate;
-        Calendar mCalendar;
+        private static final String COLON_STRING = ":";
 
-        SimpleDateFormat mDayOfWeekFormat;
-        java.text.DateFormat mDateFormat;
+        private final GoogleApiClient mGoogleApiClient = new GoogleApiClient.Builder(SunshineWatchFace.this)
+                .addConnectionCallbacks(this)
+                .addOnConnectionFailedListener(this)
+                .addApi(Wearable.API)
+                .build();
+
+        private final Handler mUpdateTimeHandler = new EngineHandler(this);
+        private boolean mRegisteredTimeZoneReceiver = false;
+        private Paint mBackgroundPaint;
+        private Paint mHourPaint;
+        private Paint mMinuteSecondPaint;
+        private Paint mSecondaryTextPaint;
+        private boolean mAmbient;
+
+        private Date mDate;
+        private Calendar mCalendar;
+        private double mHighTemperature;
+        private double mLowTemperature;
+        private Bitmap mWeatherImage;
+
+        private SimpleDateFormat mDayOfWeekFormat;
+        private java.text.DateFormat mDateFormat;
 
         /**
          * Handles time zone and locale changes.
@@ -144,10 +180,11 @@ public class SunshineWatchFace extends CanvasWatchFaceService {
             mBackgroundPaint.setColor(resources.getColor(R.color.background));
 
             mHourPaint = createTextPaint(resources.getColor(R.color.digital_text));
-            mHourPaint.setTypeface(Typeface.DEFAULT_BOLD);
+            mHourPaint.setTypeface(Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD));
+
             timeLineHeight = mHourPaint.getFontSpacing();
             mMinuteSecondPaint = createTextPaint(resources.getColor(R.color.digital_text));
-            mMinuteSecondPaint.setTypeface(Typeface.DEFAULT);
+            mMinuteSecondPaint.setTypeface(Typeface.SANS_SERIF);
             mSecondaryTextPaint = createTextPaint(resources.getColor(R.color.primary_light));
             dateLineHeight = mSecondaryTextPaint.getFontSpacing();
 
@@ -176,6 +213,7 @@ public class SunshineWatchFace extends CanvasWatchFaceService {
             super.onVisibilityChanged(visible);
 
             if (visible) {
+                mGoogleApiClient.connect();
                 registerReceiver();
 
                 // Update time zone and date formats, in case they changed while we weren't visible.
@@ -183,6 +221,11 @@ public class SunshineWatchFace extends CanvasWatchFaceService {
                 initFormats();
             } else {
                 unregisterReceiver();
+
+                if (mGoogleApiClient != null && mGoogleApiClient.isConnected()) {
+                    Wearable.DataApi.removeListener(mGoogleApiClient, this);
+                    mGoogleApiClient.disconnect();
+                }
             }
 
             // Whether the timer should be running depends on whether we're visible (as well as
@@ -191,7 +234,7 @@ public class SunshineWatchFace extends CanvasWatchFaceService {
         }
 
         private void initFormats() {
-            mDayOfWeekFormat = new SimpleDateFormat("EEEE", Locale.getDefault());
+            mDayOfWeekFormat = new SimpleDateFormat("EEE", Locale.getDefault());
             mDayOfWeekFormat.setCalendar(mCalendar);
             mDateFormat = DateFormat.getMediumDateFormat(SunshineWatchFace.this);
             mDateFormat.setCalendar(mCalendar);
@@ -278,6 +321,7 @@ public class SunshineWatchFace extends CanvasWatchFaceService {
             }
 
             float x = 0;
+            float yOffset = mYOffset;
 
             // Show colons for the first half of each second so the colons blink on when the time
             // updates.
@@ -306,17 +350,30 @@ public class SunshineWatchFace extends CanvasWatchFaceService {
             }
             final float fullTextWidth = mHourPaint.measureText(hourString)
                     + mMinuteSecondPaint.measureText(timeString.toString());
-            final float startOffset = (bounds.width() - fullTextWidth) / 2;
-            canvas.drawText(hourString, startOffset, mYOffset, mHourPaint);
-            canvas.drawText(timeString.toString(), startOffset + x, mYOffset, mMinuteSecondPaint);
+            final float startOffset = (canvas.getWidth() - fullTextWidth) / 2;
+            canvas.drawText(hourString, startOffset, yOffset, mHourPaint);
+            canvas.drawText(timeString.toString(), startOffset + x, yOffset, mMinuteSecondPaint);
 
-            final String date = mDateFormat.format(mDate);
+            final String date = mDayOfWeekFormat.format(mDate) + ", " + mDateFormat.format(mDate);
             final float fullDateTextWidth = mSecondaryTextPaint.measureText(date);
-            final float startDateTextOffset = (bounds.width() - fullDateTextWidth) / 2;
+            final float startDateTextOffset = (canvas.getWidth() - fullDateTextWidth) / 2;
+            yOffset = mYOffset + timeLineHeight + dateLineHeight;
             canvas.drawText(date,
                     startDateTextOffset,
-                    mYOffset + timeLineHeight + dateLineHeight,
+                    yOffset,
                     mSecondaryTextPaint);
+
+            final float lineWidth = canvas.getWidth() / 3.f;
+            yOffset += dateLineHeight;
+            canvas.drawLine(canvas.getWidth() / 2 - lineWidth / 2, yOffset, canvas.getWidth() / 2 + lineWidth / 2, yOffset, mSecondaryTextPaint);
+            yOffset += dateLineHeight;
+            x = canvas.getWidth() / 2;
+            canvas.drawText(String.format("%1.0f", mHighTemperature), x, yOffset, mHourPaint);
+            x += mHourPaint.measureText(String.format("%1.0f", mHighTemperature));
+            canvas.drawText(String.format("%1.0f", mLowTemperature), x, yOffset, mHourPaint);
+            if (mWeatherImage != null) {
+                canvas.drawBitmap(mWeatherImage, canvas.getWidth() / 2 - mWeatherImage.getWidth(), yOffset, mHourPaint);
+            }
         }
 
         private String formatTwoDigitNumber(int hour) {
@@ -353,6 +410,81 @@ public class SunshineWatchFace extends CanvasWatchFaceService {
                         - (timeMs % INTERACTIVE_UPDATE_RATE_MS);
                 mUpdateTimeHandler.sendEmptyMessageDelayed(MSG_UPDATE_TIME, delayMs);
             }
+        }
+
+        private void updateConfigDataItemAndUiOnStartup() {
+            final PutDataMapRequest putDataMapRequest = PutDataMapRequest.create(WEATHER_PATH);
+            putDataMapRequest.getDataMap().putBoolean("need_update", true);
+            final PutDataRequest request = putDataMapRequest.asPutDataRequest();
+            Wearable.DataApi.putDataItem(mGoogleApiClient, request)
+                    .setResultCallback(new ResultCallback<DataApi.DataItemResult>() {
+                        @Override
+                        public void onResult(DataApi.DataItemResult dataItemResult) {
+                            if (!dataItemResult.getStatus().isSuccess()) {
+                                Log.d("SunshineWatchFace", "Failed asking phone for weather data");
+                            } else {
+                                Log.d("SunshineWatchFace", "Successfully asked for weather data");
+                            }
+                        }
+                    });
+        }
+
+        @Override
+        public void onDataChanged(DataEventBuffer dataEventBuffer) {
+            Log.d("SunshineWatch", "onDataChanged");
+            for (final DataEvent dataEvent : dataEventBuffer) {
+                if (dataEvent.getType() == DataEvent.TYPE_CHANGED) {
+                    final DataMap dataMap = DataMapItem.fromDataItem(dataEvent.getDataItem()).getDataMap();
+                    final String path = dataEvent.getDataItem().getUri().getPath();
+                    if (path.equals("weather-info")) {
+                        mHighTemperature = dataMap.getDouble("high");
+                        mLowTemperature = dataMap.getDouble("low");
+                        final Asset weatherIconAsset = dataMap.getAsset("weatherImage");
+                        mWeatherImage = loadBitmapFromAsset(weatherIconAsset);
+                    }
+                }
+            }
+            invalidate();
+        }
+
+        @Override
+        public void onConnected(Bundle bundle) {
+            Log.d("SunshineWatch", "onConnected");
+            Wearable.DataApi.addListener(mGoogleApiClient, Engine.this);
+            updateConfigDataItemAndUiOnStartup();
+        }
+
+        @Override
+        public void onConnectionSuspended(int i) {
+            Log.d("SunshineWatch", "onConnectionSuspended " + i);
+        }
+
+        @Override
+        public void onConnectionFailed(ConnectionResult connectionResult) {
+            Log.d("SunshineWatch", "onConnectionFailed");
+        }
+
+        private final long TIMEOUT_MS = 1000;
+        public Bitmap loadBitmapFromAsset(Asset asset) {
+            if (asset == null) {
+                throw new IllegalArgumentException("Asset must be non-null");
+            }
+            ConnectionResult result =
+                    mGoogleApiClient.blockingConnect(TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            if (!result.isSuccess()) {
+                return null;
+            }
+            // convert asset into a file descriptor and block until it's ready
+            InputStream assetInputStream = Wearable.DataApi.getFdForAsset(
+                    mGoogleApiClient, asset).await().getInputStream();
+            mGoogleApiClient.disconnect();
+
+            if (assetInputStream == null) {
+//                Log.w(TAG, "Requested an unknown Asset.");
+                return null;
+            }
+            // decode the stream into a bitmap
+            return BitmapFactory.decodeStream(assetInputStream);
         }
     }
 }

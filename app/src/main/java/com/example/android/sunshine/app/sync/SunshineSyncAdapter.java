@@ -36,12 +36,21 @@ import com.example.android.sunshine.app.R;
 import com.example.android.sunshine.app.Utility;
 import com.example.android.sunshine.app.data.WeatherContract;
 import com.example.android.sunshine.app.muzei.WeatherMuzeiSource;
+import com.google.android.gms.common.api.GoogleApiClient;
+import com.google.android.gms.common.api.ResultCallbacks;
+import com.google.android.gms.common.api.Status;
+import com.google.android.gms.wearable.Asset;
+import com.google.android.gms.wearable.DataApi;
+import com.google.android.gms.wearable.PutDataMapRequest;
+import com.google.android.gms.wearable.PutDataRequest;
+import com.google.android.gms.wearable.Wearable;
 
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -69,6 +78,12 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
             WeatherContract.WeatherEntry.COLUMN_MAX_TEMP,
             WeatherContract.WeatherEntry.COLUMN_MIN_TEMP,
             WeatherContract.WeatherEntry.COLUMN_SHORT_DESC
+    };
+
+    private static final String[] WEAR_WEATHER_PROJECTION = new String[] {
+            WeatherContract.WeatherEntry.COLUMN_WEATHER_ID,
+            WeatherContract.WeatherEntry.COLUMN_MAX_TEMP,
+            WeatherContract.WeatherEntry.COLUMN_MIN_TEMP
     };
 
     // these indices must match the projection
@@ -364,11 +379,12 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
                 // delete old data so we don't build up an endless history
                 getContext().getContentResolver().delete(WeatherContract.WeatherEntry.CONTENT_URI,
                         WeatherContract.WeatherEntry.COLUMN_DATE + " <= ?",
-                        new String[] {Long.toString(dayTime.setJulianDay(julianStartDay-1))});
+                        new String[]{Long.toString(dayTime.setJulianDay(julianStartDay - 1))});
 
                 updateWidgets();
                 updateMuzei();
                 notifyWeather();
+                notifyWear();
             }
             Log.d(LOG_TAG, "Sync Complete. " + cVVector.size() + " Inserted");
             setLocationStatus(getContext(), LOCATION_STATUS_OK);
@@ -503,6 +519,80 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
                 cursor.close();
             }
         }
+    }
+
+    private Asset createAssetFromBitmap(Bitmap bitmap) {
+        final ByteArrayOutputStream byteStream = new ByteArrayOutputStream();
+        bitmap.compress(Bitmap.CompressFormat.PNG, 100, byteStream);
+        return Asset.createFromBytes(byteStream.toByteArray());
+    }
+
+    private void notifyWear() {
+        Log.d(LOG_TAG, "notifyWear");
+        Context context = getContext();
+        String locationQuery = Utility.getPreferredLocation(context);
+
+        Uri weatherUri = WeatherContract.WeatherEntry.buildWeatherLocationWithDate(locationQuery, System.currentTimeMillis());
+
+        // we'll query our contentProvider, as always
+        Cursor cursor = context.getContentResolver().query(weatherUri, WEAR_WEATHER_PROJECTION, null, null, null);
+
+        if (cursor.moveToFirst()) {
+            int weatherId = cursor.getInt(INDEX_WEATHER_ID);
+            double high = cursor.getDouble(INDEX_MAX_TEMP);
+            double low = cursor.getDouble(INDEX_MIN_TEMP);
+
+//            int iconId = Utility.getIconResourceForWeatherCondition(weatherId);
+            Resources resources = context.getResources();
+            int artResourceId = Utility.getArtResourceForWeatherCondition(weatherId);
+            String artUrl = Utility.getArtUrlForWeatherCondition(context, weatherId);
+
+            @SuppressLint("InlinedApi")
+            int largeIconWidth = resources.getDimensionPixelSize(R.dimen.wear_icon_default);
+            @SuppressLint("InlinedApi")
+            int largeIconHeight = resources.getDimensionPixelSize(R.dimen.wear_icon_default);
+
+            // Retrieve the large icon
+            Bitmap largeIcon;
+            try {
+                largeIcon = Glide.with(context)
+                        .load(artUrl)
+                        .asBitmap()
+                        .error(artResourceId)
+                        .fitCenter()
+                        .into(largeIconWidth, largeIconHeight).get();
+            } catch (InterruptedException | ExecutionException e) {
+                Log.e(LOG_TAG, "Error retrieving large icon from " + artUrl, e);
+                largeIcon = BitmapFactory.decodeResource(resources, artResourceId);
+            }
+
+            final Asset asset = createAssetFromBitmap(largeIcon);
+            final PutDataMapRequest putDataMapRequest = PutDataMapRequest.create("/weather-info");
+            putDataMapRequest.getDataMap().putDouble("high", high);
+            putDataMapRequest.getDataMap().putDouble("low", low);
+            putDataMapRequest.getDataMap().putAsset("weatherImage", asset);
+            final PutDataRequest request = putDataMapRequest.asPutDataRequest();
+            final GoogleApiClient googleApiClient = new GoogleApiClient.Builder(getContext())
+                    .addApi(Wearable.API)
+                    .build();
+            Wearable.DataApi.putDataItem(googleApiClient, request)
+                .setResultCallback(new ResultCallbacks<DataApi.DataItemResult>() {
+                    @Override
+                    public void onSuccess(DataApi.DataItemResult dataItemResult) {
+                        if (dataItemResult.getStatus().isSuccess()) {
+                            Log.d(LOG_TAG, "Successfully sent weather data");
+                        } else {
+                            Log.d(LOG_TAG, "Failed to send weather data");
+                        }
+                    }
+
+                    @Override
+                    public void onFailure(Status status) {
+
+                    }
+                });
+        }
+        cursor.close();
     }
 
     /**
