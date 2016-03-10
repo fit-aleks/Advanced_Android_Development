@@ -22,6 +22,9 @@ Getting Started
 This sample uses the Gradle build system.  To build this project, use the
 "gradlew build" command or use "Import Project" in Android Studio.
 
+You should enter your private key to `dependencies.gradle` file and then perform command
+`git update-index --assume-unchanged dependencies.gradle` to prevent pushing changes in it.
+
 Support
 -------
 
