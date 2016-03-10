@@ -588,7 +588,7 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
 
                     @Override
                     public void onFailure(Status status) {
-
+                        Log.d(LOG_TAG, "onFailure" + status);
                     }
                 });
         }

@@ -63,6 +63,7 @@ import java.util.Calendar;
 import java.util.Date;
 import java.util.Locale;
 import java.util.TimeZone;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -414,7 +415,7 @@ public class SunshineWatchFace extends CanvasWatchFaceService {
 
         private void updateConfigDataItemAndUiOnStartup() {
             final PutDataMapRequest putDataMapRequest = PutDataMapRequest.create(WEATHER_PATH);
-            putDataMapRequest.getDataMap().putBoolean("need_update", true);
+            putDataMapRequest.getDataMap().putString("uuid", UUID.randomUUID().toString());
             final PutDataRequest request = putDataMapRequest.asPutDataRequest();
             Wearable.DataApi.putDataItem(mGoogleApiClient, request)
                     .setResultCallback(new ResultCallback<DataApi.DataItemResult>() {
